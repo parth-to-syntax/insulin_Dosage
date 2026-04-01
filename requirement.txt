@@ -1,0 +1,7 @@
+simglucose==0.2.3
+numpy
+matplotlib
+seaborn
+pandas
+scipy
+gymnasium
