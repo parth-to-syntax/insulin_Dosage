@@ -5,12 +5,12 @@ import pickle
 from simulation import InsulinEnv, plot_episode
 
 # ── hyperparameters ──────────────────────────
-EPISODES      = 3000
+EPISODES      = 8000
 MAX_STEPS     = 288
 ALPHA         = 0.1
 GAMMA         = 0.95
 EPSILON       = 1.0
-EPSILON_DECAY = 0.995
+EPSILON_DECAY = 0.998
 EPSILON_MIN   = 0.01
 
 # ── Q-table ──────────────────────────────────

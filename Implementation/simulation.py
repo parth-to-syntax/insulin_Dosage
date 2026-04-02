@@ -61,12 +61,16 @@ class InsulinEnv:
 
     @staticmethod
     def get_reward(glucose):
-        if   70 <= glucose <= 140: return +10.0
-        elif 140 < glucose <= 180: return  -5.0
-        elif 180 < glucose <= 250: return -15.0
-        elif 54  <= glucose < 70:  return -25.0
-        elif glucose < 54:         return -50.0
-        else:                      return -20.0
+        # Give strongest reward in the middle of TIR, softer near edges,
+        # and stronger penalties for hypo/hyper to improve safety.
+        if   90 <= glucose <= 130: return +12.0
+        elif 70 <= glucose < 90:   return  +6.0
+        elif 130 < glucose <= 140: return  +6.0
+        elif 140 < glucose <= 180: return  -8.0
+        elif 180 < glucose <= 250: return -18.0
+        elif glucose > 250:        return -30.0
+        elif 54  <= glucose < 70:  return -35.0
+        else:                      return -60.0
 
     def reset(self):
         self._build_env()

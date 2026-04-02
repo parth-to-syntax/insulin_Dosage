@@ -27,13 +27,24 @@ def select_action(policy: str, state, env: InsulinEnv, q_table):
             raise FileNotFoundError(
                 "qtable.pkl not found. Run training.py first to use q_agent policy."
             )
-        return int(np.argmax(q_table[state]))
-
-    if policy == "fixed":
+        action = int(np.argmax(q_table[state]))
+    elif policy == "fixed":
         # 6U morning/afternoon, else 0U
-        return 3 if state[4] in [1, 2] else 0
+        action = 3 if state[4] in [1, 2] else 0
+    elif policy == "random":
+        action = np.random.randint(env.n_actions)
+    else:
+        action = np.random.randint(env.n_actions)
 
-    return np.random.randint(env.n_actions)
+    g_bin, d_bin = state[0], state[1]
+    # Safety layer: avoid aggressive dosing when BG is low or trending down.
+    if g_bin == 0:              # <70
+        return 0
+    if g_bin == 1 and d_bin == 0:  # 70-140 and falling
+        return min(action, 1)
+    if g_bin == 1 and d_bin == 1:  # 70-140 and stable
+        return min(action, 2)
+    return action
 
 
 def run_episode(policy: str, patient: str, seed: int, max_steps: int, live: bool, speed: float):
