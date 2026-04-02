@@ -5,3 +5,4 @@ seaborn
 pandas
 scipy
 gymnasium
+streamlit
