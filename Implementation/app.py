@@ -1,6 +1,7 @@
 import os
 import time
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,10 +16,20 @@ st.set_page_config(page_title="RL Insulin Demo", layout="wide")
 
 @st.cache_resource
 def load_q_table(path: str = "qtable.pkl"):
-    if not os.path.exists(path):
-        return None
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        Path(path),
+        base_dir / path,
+        base_dir / "Result" / "qtable.pkl",
+        base_dir.parent / "Result" / "qtable.pkl",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            with open(candidate, "rb") as f:
+                return pickle.load(f)
+
+    return None
 
 
 def select_action(policy: str, state, env: InsulinEnv, q_table):
@@ -29,21 +40,21 @@ def select_action(policy: str, state, env: InsulinEnv, q_table):
             )
         action = int(np.argmax(q_table[state]))
     elif policy == "fixed":
-        # 6U morning/afternoon, else 0U
+        # 3U morning/afternoon, else 0U
         action = 3 if state[4] in [1, 2] else 0
     elif policy == "random":
         action = np.random.randint(env.n_actions)
     else:
         action = np.random.randint(env.n_actions)
 
-    g_bin, d_bin = state[0], state[1]
-    # Safety layer: avoid aggressive dosing when BG is low or trending down.
-    if g_bin == 0:              # <70
+    g_bin = state[0]
+    current_glucose = env.glucose_history[-1]
+    hour = env.current_hour()
+
+    if current_glucose < 90 or g_bin == 0:
         return 0
-    if g_bin == 1 and d_bin == 0:  # 70-140 and falling
-        return min(action, 1)
-    if g_bin == 1 and d_bin == 1:  # 70-140 and stable
-        return min(action, 2)
+    if not env.in_meal_window(hour) and action > 3:
+        return 3
     return action
 
 
@@ -95,7 +106,7 @@ def run_episode(policy: str, patient: str, seed: int, max_steps: int, live: bool
 
             chart_slot.pyplot(fig, clear_figure=False)
             status_slot.info(
-                f"Step: {step}/{max_steps} | Current BG: {glucose[-1]:.1f} | Reward: {reward:.1f}"
+                f"Step: {step}/{max_steps} | Current BG: {glucose[-1]:.1f}"
             )
             time.sleep(speed)
 
@@ -161,7 +172,7 @@ with st.sidebar:
     )
     policy = st.selectbox("Policy", ["q_agent", "fixed", "random"], index=0)
     seed = st.number_input("Seed", min_value=0, max_value=9999, value=42, step=1)
-    max_steps = st.slider("Max steps", min_value=72, max_value=288, value=288, step=24)
+    max_steps = st.slider("Max steps", min_value=48, max_value=144, value=144, step=12)
     live_mode = st.toggle("Live playback", value=True)
     speed = st.slider("Playback delay (seconds)", min_value=0.0, max_value=0.2, value=0.02, step=0.01)
 

@@ -9,26 +9,27 @@ with open('qtable.pkl', 'rb') as f:
     Q = pickle.load(f)
 
 
-def safety_cap_action(action, state):
-    g_bin, d_bin = state[0], state[1]
-    if g_bin == 0:                  # <70
+def safety_cap_action(action, state, env):
+    g_bin = state[0]
+    current_glucose = env.glucose_history[-1]
+    hour = env.current_hour()
+
+    if current_glucose < 90 or g_bin == 0:
         return 0
-    if g_bin == 1 and d_bin == 0:   # 70-140 and falling
-        return min(action, 1)
-    if g_bin == 1 and d_bin == 1:   # 70-140 and stable
-        return min(action, 2)
+    if not env.in_meal_window(hour) and action > 3:
+        return 3
     return action
 
 # ── policy runner ─────────────────────────────
-def run_episode(policy, patient_name, seed, max_steps=288):
+def run_episode(policy, patient_name, seed, max_steps=144):
     env   = InsulinEnv(patient_name=patient_name, seed=seed)
     state = env.reset()
     done  = False; step = 0
     while not done and step < max_steps:
         if   policy == 'q_agent': action = int(np.argmax(Q[state]))
-        elif policy == 'fixed':   action = 3 if state[4] in [1,2] else 0  # 6U morning/afternoon
+        elif policy == 'fixed':   action = 3 if state[4] in [1,2] else 0  # 3U morning/afternoon
         elif policy == 'random':  action = np.random.randint(env.n_actions)
-        action = safety_cap_action(action, state)
+        action = safety_cap_action(action, state, env)
         state, _, done = env.step(action)
         step += 1
     return env

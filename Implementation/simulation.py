@@ -13,12 +13,15 @@ from datetime import datetime
 
 
 class InsulinEnv:
-    ACTIONS      = [0, 2, 4, 6, 8]
+    ACTIONS      = [0, 1, 2, 3, 5, 8]
     GLUCOSE_BINS = [70, 140, 180]
     DELTA_BINS   = [-2, 2]
     MEAL_BINS    = [20, 60]
     LAG_BINS     = [1, 3]
     TOD_BINS     = [6, 12, 18]
+    DT_MIN       = 5
+    TOTAL_HOURS  = 12
+    TOTAL_STEPS  = int(TOTAL_HOURS * 60 / DT_MIN)
 
     def __init__(self, patient_name='adult#001', seed=42):
         self.patient_name    = patient_name
@@ -60,22 +63,30 @@ class InsulinEnv:
         )
 
     @staticmethod
-    def get_reward(glucose):
-        # Give strongest reward in the middle of TIR, softer near edges,
-        # and stronger penalties for hypo/hyper to improve safety.
-        if   90 <= glucose <= 130: return +12.0
-        elif 70 <= glucose < 90:   return  +6.0
-        elif 130 < glucose <= 140: return  +6.0
-        elif 140 < glucose <= 180: return  -8.0
-        elif 180 < glucose <= 250: return -18.0
-        elif glucose > 250:        return -30.0
-        elif 54  <= glucose < 70:  return -35.0
-        else:                      return -60.0
+    def get_reward(glucose, dose):
+        if 70 <= glucose <= 140:
+            reward = +3.0
+        elif glucose < 70:
+            reward = -8.0
+        elif glucose > 180:
+            reward = -4.0
+        else:
+            reward = -1.0
+
+        reward -= 0.05 * dose
+        return reward
+
+    def current_hour(self):
+        return (self.step_count * self.DT_MIN) / 60.0
+
+    @staticmethod
+    def in_meal_window(hour):
+        return (2.0 <= hour <= 3.0) or (8.0 <= hour <= 9.0)
 
     def reset(self):
         self._build_env()
         obs, _, _, _ = self.env.step(Action(basal=0, bolus=0))
-        glucose = obs.CGM
+        glucose = max(40.0, float(obs.CGM))
         self.glucose_history = [glucose]
         self.dose_history    = [0]
         self.reward_history  = []
@@ -86,20 +97,34 @@ class InsulinEnv:
         return self._get_state(glucose)
 
     def step(self, action_idx):
+        action_idx = int(np.clip(action_idx, 0, self.n_actions - 1))
+        hour = self.current_hour()
+        current_glucose = self.glucose_history[-1]
+
+        # Always block insulin when already low.
+        if current_glucose < 90:
+            action_idx = 0
+        # Outside meal windows, cap to conservative doses (0-3U).
+        elif not self.in_meal_window(hour) and action_idx > 3:
+            action_idx = 3
+
         dose = self.ACTIONS[action_idx]
         if dose > 0:
             self.last_dose_step = self.step_count
-        obs, _, done, _ = self.env.step(Action(basal=0.025, bolus=dose/60.0))
-        glucose = obs.CGM
-        meal    = getattr(obs, 'CHO', 0) or 0
+        obs, _, done, _ = self.env.step(Action(basal=0.0, bolus=dose/60.0))
+
+        glucose = max(40.0, float(obs.CGM))
+
+        meal = 60 if self.in_meal_window(hour) else 0
         self.last_meal    = meal
         self.prev_glucose = self.glucose_history[-1]
-        reward = self.get_reward(glucose)
+        reward = self.get_reward(glucose, dose)
         self.glucose_history.append(glucose)
         self.dose_history.append(dose)
         self.reward_history.append(reward)
         self.step_count += 1
         if glucose < 50: done = True
+        if self.step_count >= self.TOTAL_STEPS: done = True
         return self._get_state(glucose, meal), reward, done
 
     def time_in_range(self):
@@ -137,7 +162,7 @@ if __name__ == '__main__':
     env   = InsulinEnv(patient_name='adult#001', seed=42)
     state = env.reset()
     done  = False; step = 0
-    while not done and step < 288:
+    while not done and step < env.TOTAL_STEPS:
         state, reward, done = env.step(np.random.randint(env.n_actions))
         step += 1
     print(f"TIR    : {env.time_in_range():.1f}%")

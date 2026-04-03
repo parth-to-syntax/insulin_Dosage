@@ -5,21 +5,33 @@ import pickle
 from simulation import InsulinEnv, plot_episode
 
 # ── hyperparameters ──────────────────────────
-EPISODES      = 8000
-MAX_STEPS     = 288
+EPISODES      = 1500
+MAX_STEPS     = 144
 ALPHA         = 0.1
-GAMMA         = 0.95
+GAMMA         = 0.9
 EPSILON       = 1.0
-EPSILON_DECAY = 0.998
-EPSILON_MIN   = 0.01
+EPSILON_DECAY = 0.997
+EPSILON_MIN   = 0.05
+
+# ── convergence controls ─────────────────────
+MIN_EPISODES      = 600
+CHECK_WINDOW      = 100
+EARLY_STOP_PATIENCE = 3
+TIR_IMPROVE_THR   = 0.10
+REWARD_IMPROVE_THR = 0.8
 
 # ── Q-table ──────────────────────────────────
-Q = np.zeros((4, 3, 3, 3, 4, 5))   # glucose x delta x meal x lag x tod x action
+Q = np.zeros((4, 3, 3, 3, 4, 6))   # glucose x delta x meal x lag x tod x action
 
 # ── training loop ────────────────────────────
 episode_rewards, episode_tir = [], []
 epsilon = EPSILON
 env     = InsulinEnv(patient_name='adult#001')
+
+best_window_tir = -np.inf
+best_window_reward = -np.inf
+no_improve_count = 0
+trained_episodes = 0
 
 for ep in range(EPISODES):
     env.seed = ep
@@ -28,7 +40,13 @@ for ep in range(EPISODES):
 
     while not done and step < MAX_STEPS:
         if np.random.rand() < epsilon:
-            action = np.random.randint(env.n_actions)       # explore
+            # Safer exploration: no aggressive bolus outside meal windows.
+            if env.glucose_history[-1] < 90:
+                action = 0
+            elif not env.in_meal_window(env.current_hour()):
+                action = np.random.randint(0, 4)
+            else:
+                action = np.random.randint(env.n_actions)
         else:
             action = int(np.argmax(Q[state]))               # exploit
 
@@ -43,18 +61,42 @@ for ep in range(EPISODES):
     episode_rewards.append(total_r)
     episode_tir.append(env.time_in_range())
     epsilon = max(EPSILON_MIN, epsilon * EPSILON_DECAY)
+    trained_episodes = ep + 1
 
     if (ep + 1) % 300 == 0:
         print(f"Ep {ep+1:4d} | Reward: {np.mean(episode_rewards[-300:]):7.1f} "
               f"| TIR: {np.mean(episode_tir[-300:]):.1f}% | ε: {epsilon:.3f}")
 
+    if (ep + 1) >= MIN_EPISODES and (ep + 1) % CHECK_WINDOW == 0:
+        window_tir = float(np.mean(episode_tir[-CHECK_WINDOW:]))
+        window_reward = float(np.mean(episode_rewards[-CHECK_WINDOW:]))
+
+        tir_improved = window_tir > (best_window_tir + TIR_IMPROVE_THR)
+        reward_improved = window_reward > (best_window_reward + REWARD_IMPROVE_THR)
+
+        if tir_improved or reward_improved:
+            best_window_tir = max(best_window_tir, window_tir)
+            best_window_reward = max(best_window_reward, window_reward)
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
+
+        if no_improve_count >= EARLY_STOP_PATIENCE and epsilon <= 0.15:
+            print(
+                f"Early stop at episode {ep+1} | "
+                f"Window TIR: {window_tir:.2f}% | Window Reward: {window_reward:.2f}"
+            )
+            break
+
 # ── save ─────────────────────────────────────
 with open('qtable.pkl', 'wb') as f:
     pickle.dump(Q, f)
-print("Q-table saved")
+print(f"Q-table saved (episodes trained: {trained_episodes})")
 
 # ── training curves ───────────────────────────
 def smooth(arr, w=50):
+    if len(arr) < w:
+        return np.array(arr)
     return np.convolve(arr, np.ones(w)/w, mode='valid')
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
