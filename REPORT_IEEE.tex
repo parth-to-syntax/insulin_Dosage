@@ -1,0 +1,382 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{cite}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\graphicspath{{Implementation/}{Result/}}
+
+\title{Safety-Aware Tabular Reinforcement Learning for Insulin Dosing in a Simulated Type-1 Diabetes Environment}
+
+\author{%
+\IEEEauthorblockN{Parth Srivastava (23BCE216)}
+\IEEEauthorblockA{Department of Computer Science and Engineering \\
+Nirma University \\
+Course Code: 3CS108ME24}
+\and
+\IEEEauthorblockN{Nihar Mehta (23BCE197)}
+\IEEEauthorblockA{Department of Computer Science and Engineering \\
+Nirma University \\
+Course Code: 3CS108ME24}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This work presents an end-to-end reinforcement learning (RL) pipeline for insulin dosing using a physiological Type-1 Diabetes simulator. Instead of real-patient datasets, the agent learns by interaction with a simulated environment consisting of a virtual patient, continuous glucose monitor, insulin pump, and meal scenarios. A tabular Q-learning agent with epsilon-greedy exploration is trained under explicit safety constraints, then benchmarked against fixed and random baselines across multiple virtual patients and random seeds. The framework includes environment design, training, evaluation, and a Streamlit-based interactive demo. The objective is to improve glycemic control while reducing unsafe decisions such as insulin delivery at low glucose.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Reinforcement Learning, Q-learning, Insulin Dosing, Type-1 Diabetes, simglucose, Safety Constraints, Decision Support
+\end{IEEEkeywords}
+
+\section{Introduction}
+Type-1 Diabetes management requires repeated insulin dosing decisions under uncertainty. Poor dosing may cause hypoglycemia or persistent hyperglycemia. This project models insulin dosing as a sequential decision-making problem and solves it using tabular Q-learning in simulation.
+Unlike static prediction tasks, dosing decisions have delayed effects and safety implications over future time steps. Therefore, policy learning must optimize cumulative outcomes, not only immediate glucose values. This motivates a reinforcement learning framing where the agent continuously balances control effectiveness and safety risk.
+
+\subsection{What is happening in this project?}
+This project builds a \textbf{Reinforcement Learning (RL) system for insulin dosing} using a simulator instead of real patient data. The RL agent learns how much insulin to give based on glucose levels and context, aiming to keep glucose in a safe range.
+From an engineering perspective, this work is a complete closed-loop decision system: simulation environment design, agent training, baseline comparison, safety gating, and visualization are all integrated into one reproducible pipeline.
+
+\section{System and Codebase Overview}
+The implementation is organized into four main components:
+\begin{itemize}
+    \item \textbf{Environment:} \texttt{Implementation/simulation.py}
+    \item \textbf{Training:} \texttt{Implementation/training.py}
+    \item \textbf{Evaluation:} \texttt{Implementation/testing.py}
+    \item \textbf{Interactive demo:} \texttt{Implementation/app.py}
+\end{itemize}
+
+Pipeline flow:
+\begin{enumerate}
+    \item Build environment state from simulator observations.
+    \item Select insulin action using policy.
+    \item Apply safety layer on action.
+    \item Step simulator and compute reward.
+    \item Update Q-table during training.
+    \item Evaluate learned policy against baselines.
+\end{enumerate}
+This separation of concerns makes the project maintainable: environment logic and safety rules are centralized in one module, training logic is isolated for experimentation, and evaluation/UI modules consume the learned policy without retraining.
+
+\section{Environment Design}
+\subsection{What is the environment?}
+The environment is a \textbf{simulated Type-1 Diabetes system} based on a physiological model. It includes:
+\begin{itemize}
+    \item Virtual patient (\texttt{T1DPatient})
+    \item Glucose sensor (\texttt{CGMSensor})
+    \item Insulin pump (\texttt{InsulinPump})
+    \item Meal scenario generator (\texttt{RandomScenario})
+\end{itemize}
+It acts as a \textbf{closed-loop feedback system}: insulin actions modify future glucose trajectories.
+
+The simulator stack is based on the UVA/Padova virtual patient paradigm and implemented in the \texttt{simglucose} framework, which is widely used for in-silico glucose-control research \cite{simglucose_repo,simglucose_2018,uva_padova}. In practical terms, each step in the environment executes the following loop:
+\begin{enumerate}
+    \item CGM provides the current glucose estimate.
+    \item Agent proposes a bolus action.
+    \item Safety layer can override or cap the action.
+    \item Insulin pump applies the accepted dose.
+    \item Patient dynamics evolve glucose/insulin states.
+    \item Environment returns next observation and reward.
+\end{enumerate}
+
+\subsection{Simglucose Personas Used in This Project}
+In this codebase, evaluation is performed across multiple simulated personas to avoid overfitting to a single physiology profile. The specific personas used are:
+\begin{itemize}
+    \item \textbf{Adult personas:} \texttt{adult\#001}, \texttt{adult\#003}, \texttt{adult\#007}
+    \item \textbf{Adolescent persona:} \texttt{adolescent\#003}
+    \item \textbf{Child persona:} \texttt{child\#002}
+\end{itemize}
+
+These persona groups differ in insulin sensitivity, meal-response behavior, and glycemic variability; therefore, policy robustness must be judged across all groups, not only adults.
+This is important because a policy that is safe for one phenotype can become over-aggressive or under-reactive for another. Multi-persona testing reduces this hidden overfitting risk.
+
+\subsection{Time Resolution and Episode Horizon}
+The environment uses a 5-minute control interval:
+\begin{itemize}
+    \item \texttt{DT\_MIN = 5}
+    \item \texttt{TOTAL\_HOURS = 12}
+    \item \texttt{TOTAL\_STEPS = 144}
+\end{itemize}
+An episode ends at 12 hours or when glucose falls below 50 mg/dL.
+The fixed 12-hour horizon keeps experiments computationally practical while still capturing post-meal and delayed insulin effects over a clinically meaningful interval.
+
+\section{State, Action, and Reward Formulation}
+\subsection{State Representation}
+The state is discretized into 5 dimensions:
+\begin{enumerate}
+    \item Glucose bin: \([70, 140, 180]\) gives 4 bins
+    \item Glucose trend (delta): \([-2, 2]\) gives 3 bins
+    \item Meal-context bin: \([20, 60]\) gives 3 bins
+    \item Dose-lag bin: \([1, 3]\) gives 3 bins
+    \item Time-of-day bin: \([6, 12, 18]\) gives 4 bins
+\end{enumerate}
+Hence total state cardinality is:
+\begin{equation}
+|\mathcal{S}| = 4 \times 3 \times 3 \times 3 \times 4 = 432
+\end{equation}
+This compact state space is deliberate: it is large enough to encode control context, yet small enough for stable tabular learning within limited training time.
+
+\subsection{Action Space}
+Discrete insulin actions (units):
+\begin{equation}
+\mathcal{A} = \{0, 1, 2, 3, 5, 8\}
+\end{equation}
+So each state has 6 possible actions.
+The action set includes conservative and aggressive doses so the policy can adapt to both mild drift and sharp meal-induced excursions.
+
+\subsection{Reward Strategy}
+Current reward logic:
+\begin{itemize}
+    \item \(+3\) if glucose in \([70, 140]\)
+    \item \(-8\) if glucose \(< 70\)
+    \item \(-4\) if glucose \(> 180\)
+    \item \(-1\) otherwise
+    \item Additional insulin cost: \(-0.05 \times \text{dose}\)
+\end{itemize}
+This balances glycemic control with conservative dosing.
+The asymmetric penalty design (stronger low-glucose penalty) reflects clinical priorities where hypoglycemia generally has higher immediate safety risk.
+
+\section{Agent, Policy, and Safety}
+\subsection{What type of agent and policy is used?}
+\textbf{Agent:} Tabular Q-learning agent (discrete state and action spaces).
+
+\textbf{Policy:} Epsilon-greedy.
+\begin{itemize}
+    \item Early training: more exploration (random action)
+    \item Later training: more exploitation (argmax action from Q-table)
+\end{itemize}
+
+\textbf{Safety-aware policy constraints:}
+\begin{itemize}
+    \item If current glucose is below 90 mg/dL, force 0U insulin.
+    \item Outside meal windows (2--3 h and 8--9 h), aggressive doses are limited by capping actions above 3U to 3U.
+\end{itemize}
+These guardrails act as rule-based safety filters over the learned policy, creating a hybrid decision system that is easier to justify in an academic healthcare context.
+
+\section{How the Q-Table is Obtained}
+\subsection{How do we obtain the Q-table?}
+The Q-table is learned through \textbf{trial-and-error interaction} with the environment.
+At each step:
+\begin{enumerate}
+    \item Agent observes state (glucose, trend, meal context, lag, time-of-day).
+    \item Agent takes an action (insulin dose).
+    \item Environment returns next state and reward.
+    \item Q-value is updated via Bellman update.
+\end{enumerate}
+Over many episodes, Q-values move toward an optimal action-value estimate, and the resulting Q-table represents the learned policy.
+Because the same update mechanism is applied repeatedly under varied random seeds, the table gradually captures long-term action utility across recurring glucose-control scenarios.
+
+\section{Math Used (Core Idea)}
+\subsection{Bellman Optimality Perspective}
+The approach is based on the \textbf{Bellman Optimality Equation}. The update rule used in training is:
+\begin{equation}
+Q(s,a) \leftarrow Q(s,a) + \alpha \left[r + \gamma \max_{a'}Q(s',a') - Q(s,a)\right]
+\end{equation}
+where:
+\begin{itemize}
+    \item \(\alpha\): learning rate (how fast values are updated)
+    \item \(\gamma\): discount factor (importance of future rewards)
+    \item \(\max_{a'}Q(s',a')\): best estimated future action value
+\end{itemize}
+In implementation terms, this backup step is executed at every transition and directly updates the 6-action slice corresponding to the current discretized state.
+
+\section{Why Tabular Q-Learning Instead of Other RL Technologies}
+This project intentionally uses tabular Q-learning rather than deep RL methods such as DQN, PPO, or SAC \cite{dqn_nature,ppo,sac}.
+
+\subsection{Reason 1: State-Action Size is Manageable}
+With 432 states and 6 actions, a Q-table has only 2592 values. This is tractable, fast to train, and easy to inspect. In contrast, deep RL adds neural approximation overhead that is not strictly necessary at this scale.
+
+\subsection{Reason 2: Data Efficiency in Low-Resource Setting}
+Simulation episodes are still finite in number, and stable deep RL typically needs more tuning data and hyperparameter sweeps. Tabular updates are more sample-efficient for discretized control tasks.
+
+\subsection{Reason 3: Interpretability and Viva Readiness}
+A tabular policy is transparent: for any state, the chosen action is explicit from \(\arg\max_a Q(s,a)\). This makes explanation, debugging, and academic defense simpler than black-box policy networks.
+
+\subsection{Reason 4: Safety Integration Simplicity}
+Rule-based safety constraints are straightforward to compose with tabular action selection. While safe deep RL is possible, it often requires additional constrained optimization machinery.
+
+\subsection{When Other RL Methods Become Better}
+If future work moves to continuous actions, richer physiological states, or longer horizons, methods like DQN variants, PPO, and SAC may outperform tabular approaches by better function approximation capacity.
+
+\section{Training Configuration}
+Current training setup:
+\begin{itemize}
+    \item Episodes: 1500 (reduced runtime configuration)
+    \item Maximum steps per episode: 144
+    \item \(\alpha = 0.1\), \(\gamma = 0.9\)
+    \item Epsilon schedule: initial 1.0, decay 0.997, minimum 0.05
+    \item Early stopping based on moving-window improvement in reward and TIR
+\end{itemize}
+Training also uses seed variation per episode to reduce policy over-specialization to a single stochastic trajectory pattern.
+
+Q-table tensor shape:
+\begin{equation}
+(4,3,3,3,4,6)
+\end{equation}
+This shape is directly aligned with the discretization design, so indexing remains deterministic and computationally cheap.
+
+\section{Evaluation Protocol}
+The learned policy is compared with:
+\begin{itemize}
+    \item \textbf{q\_agent}: argmax action from learned Q-table
+    \item \textbf{fixed}: rule-based baseline (3U in morning/afternoon bins, else 0U)
+    \item \textbf{random}: random action baseline
+\end{itemize}
+
+Evaluation setup:
+\begin{itemize}
+    \item Patients: adult\#001, adult\#003, adult\#007, adolescent\#003, child\#002
+    \item 15 seeds per patient per policy
+\end{itemize}
+
+Reported metrics:
+\begin{itemize}
+    \item Time in Range (70--140 mg/dL)
+    \item Total reward
+    \item Mean blood glucose
+    \item Number of hypo events (\(<70\))
+    \item Number of hyper events (\(>140\))
+\end{itemize}
+Together, these metrics provide both RL-objective and clinically interpretable views of performance, avoiding over-reliance on reward alone.
+
+\section{Detailed Visualization and Analysis}
+This project includes multiple visual artifacts for both debugging and presentation. The plots are generated by training and testing scripts and provide complementary insights: convergence behavior, learned value structure, and policy-level comparison.
+
+\subsection{Training Convergence Curves}
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{training_curves.png}
+\caption{Training curves: smoothed episode reward and TIR across episodes. The dashed TIR line marks the clinical target reference.}
+\label{fig:training_curves}
+\end{figure}
+The smoothed plotting view helps suppress high-variance episode noise and makes trend-level diagnosis easier when tuning reward and exploration schedules.
+
+How to interpret Fig. \ref{fig:training_curves}:
+\begin{itemize}
+    \item Reward trend indicates whether the agent is learning better long-horizon control.
+    \item TIR trend directly reflects clinical relevance of the learned policy.
+    \item Divergence between reward and TIR can reveal reward-design mismatch.
+    \item Flat curves are a useful signal for triggering early-stopping diagnostics or reward retuning.
+\end{itemize}
+
+\subsection{Policy Interpretability Note}
+This version of the report intentionally omits heatmap visualization to keep the results section focused on clinically interpretable trajectory and policy-comparison plots.
+
+\subsection{Policy-Level Comparative Visualization}
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{policy_comparison.png}
+\caption{Policy comparison across q\_agent, fixed, and random baselines with uncertainty bars (std).}
+\label{fig:policy_comparison}
+\end{figure}
+Error bars are critical in this context because variability across personas and seeds can be substantial even when mean values look similar.
+
+\subsection{Representative Episode Trajectories}
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{Qagent.png}
+\caption{Representative glucose-control trajectory for the learned q\_agent policy.}
+\label{fig:qagent_episode}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fixed.png}
+\caption{Representative glucose-control trajectory for the fixed baseline policy.}
+\label{fig:fixed_episode}
+\end{figure}
+
+These trajectory plots provide qualitative evidence of controller behavior over time and complement aggregate bar-chart metrics.
+
+How to interpret Fig. \ref{fig:policy_comparison}:
+\begin{itemize}
+    \item TIR comparison shows glycemic-control quality.
+    \item Hypo-event comparison quantifies safety.
+    \item Total reward summarizes long-horizon objective performance.
+    \item Standard-deviation bars indicate robustness across patients and seeds.
+\end{itemize}
+
+\subsection{Visualization Summary for Reporting}
+For IEEE-style reporting, include the following narrative after figures:
+\begin{enumerate}
+    \item Convergence quality: whether reward and TIR stabilize.
+    \item Baseline superiority/inferiority: where q\_agent beats fixed/random and where trade-offs remain.
+    \item Cross-persona consistency: whether improvements hold for adult, adolescent, and child profiles.
+    \item Safety-performance balance: discuss TIR gains versus hypo/hyper behavior.
+\end{enumerate}
+
+\section{Discussion}
+\subsection{Strengths}
+\begin{itemize}
+    \item Complete simulation-first RL workflow
+    \item Interpretable tabular policy
+    \item Explicit safety constraints in decision loop
+    \item Multi-patient and multi-seed evaluation
+    \item Interactive Streamlit demo for presentation and analysis
+\end{itemize}
+An additional strength is modularity: each script can be run independently (train/test/demo), enabling faster iteration and clear experiment traceability.
+
+\subsection{Limitations}
+\begin{itemize}
+    \item State discretization may lose fine-grained temporal dynamics
+    \item Reward tuning significantly affects behavior
+    \item Simulation-to-clinic transfer is non-trivial
+\end{itemize}
+Another practical limitation is discretization boundary sensitivity; small bin-threshold changes may alter policy behavior and therefore require careful calibration.
+
+\section{Conclusion}
+This project demonstrates a practical, safety-aware tabular RL framework for insulin dosing in a realistic simulated environment. It shows how Bellman-based Q-learning, combined with safety constraints and robust evaluation, can form a strong baseline for future safe-RL or deep-RL extensions in digital health decision support.
+Overall, the chosen methodology prioritizes reliability, interpretability, and reproducibility under course-level constraints, while leaving a clear path to advanced RL upgrades in subsequent work.
+
+\section*{Acknowledgment}
+Replace this section with your project guide, lab, or institutional acknowledgment details.
+
+\begin{thebibliography}{99}
+\bibitem{simglucose_repo}
+J. Xie, "simglucose: A Python simulation environment for Type-1 Diabetes control," GitHub repository. [Online]. Available: \url{https://github.com/jxx123/simglucose}
+
+\bibitem{simglucose_2018}
+J. Xie, M. Wang, and collaborators, "Simglucose v0.2.1," Zenodo, 2018.
+
+\bibitem{uva_padova}
+C. Dalla Man, R. A. Rizza, and C. Cobelli, "Meal simulation model of the glucose-insulin system," \emph{IEEE Transactions on Biomedical Engineering}, vol. 54, no. 10, pp. 1740--1749, 2007.
+
+\bibitem{uva_padova_accepted}
+B. P. Kovatchev \emph{et al.}, "In silico preclinical trials: A proof of concept in closed-loop control of type 1 diabetes," \emph{Journal of Diabetes Science and Technology}, vol. 3, no. 1, pp. 44--55, 2009.
+
+\bibitem{t1d_metrics}
+R. Bergenstal \emph{et al.}, "Glucose management indicator (GMI): A new term for estimating A1C from continuous glucose monitoring," \emph{Diabetes Care}, vol. 41, no. 11, pp. 2275--2280, 2018.
+
+\bibitem{tir_consensus}
+T. Battelino \emph{et al.}, "Clinical targets for continuous glucose monitoring data interpretation: Recommendations from the international consensus on time in range," \emph{Diabetes Care}, vol. 42, no. 8, pp. 1593--1603, 2019.
+
+\bibitem{safe_rl_healthcare}
+E. J. Miller and M. D. Fox, "Safe reinforcement learning in healthcare: A survey and clinical perspectives," \emph{Artificial Intelligence in Medicine}, vol. 128, 2022.
+
+\bibitem{dqn_nature}
+V. Mnih \emph{et al.}, "Human-level control through deep reinforcement learning," \emph{Nature}, vol. 518, no. 7540, pp. 529--533, 2015.
+
+\bibitem{ppo}
+J. Schulman \emph{et al.}, "Proximal policy optimization algorithms," \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem{sac}
+T. Haarnoja \emph{et al.}, "Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor," in \emph{Proc. ICML}, 2018, pp. 1861--1870.
+
+\bibitem{suttonbarto}
+R. S. Sutton and A. G. Barto, \emph{Reinforcement Learning: An Introduction}, 2nd ed. MIT Press, 2018.
+
+\bibitem{ieeeformat}
+IEEE, "IEEE Conference Template Instructions," IEEE Author Center.
+\end{thebibliography}
+
+\end{document}
